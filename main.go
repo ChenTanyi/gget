@@ -15,6 +15,7 @@ var (
 	uri              string
 	username         *string
 	password         *string
+	filename         *string
 	downloadContinue *bool
 )
 
@@ -22,6 +23,7 @@ func init() {
 	downloadContinue = flag.Bool("c", true, "Continue download")
 	username = flag.String("u", "", "User name")
 	password = flag.String("p", "", "Password")
+	filename = flag.String("o", "", "Output File")
 	help := flag.Bool("h", false, "Show help")
 
 	flag.Parse()
@@ -63,13 +65,15 @@ func main() {
 		panic(err)
 	}
 
-	paths := strings.Split(formatURL.Path, "/")
-	filename := paths[len(paths)-1]
+	if *filename == "" {
+		paths := strings.Split(formatURL.Path, "/")
+		filename = &paths[len(paths)-1]
+	}
 	filesize := int64(0)
 
 	request.SetBasicAuth(*username, *password)
 	if *downloadContinue {
-		filesize = getFileSize(filename)
+		filesize = getFileSize(*filename)
 		request.Header.Set("Range", fmt.Sprintf("bytes=%d-", filesize))
 	}
 
@@ -81,15 +85,21 @@ func main() {
 
 	var f *os.File
 	if response.StatusCode == 206 {
-		f, err = os.OpenFile(filename, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0644)
+		f, err = os.OpenFile(*filename, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0644)
 		if err != nil {
 			panic(err)
 		}
 	} else if 200 <= response.StatusCode && response.StatusCode < 300 {
 		if *downloadContinue {
 			log.Printf("Warning: can't continue download with url: %s\n", uri)
+			log.Printf("Continue to download? y/[n]")
+			var control string
+			fmt.Scanln(&control)
+			if control = strings.TrimSpace(strings.ToLower(control)); control != "y" && control != "yes" {
+				return
+			}
 		}
-		f, err = os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0644)
+		f, err = os.OpenFile(*filename, os.O_RDWR|os.O_CREATE, 0644)
 		if err != nil {
 			panic(err)
 		}
