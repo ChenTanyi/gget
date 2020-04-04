@@ -15,6 +15,7 @@ var (
 	username         *string
 	password         *string
 	filename         *string
+	thread           *int
 	downloadContinue *bool
 )
 
@@ -24,6 +25,7 @@ func ParseArgs() {
 	username = flag.String("u", "", "User name")
 	password = flag.String("p", "", "Password")
 	filename = flag.String("o", "", "Output File")
+	thread = flag.Int("x", 8, "thread number")
 	help := flag.Bool("h", false, "Show help")
 
 	flag.Parse()
@@ -41,14 +43,14 @@ func ParseArgs() {
 
 func main() {
 	log.SetFlags(log.Ltime)
-	logrus.SetLevel(logrus.DebugLevel)
+	logrus.SetLevel(logrus.InfoLevel)
 	ParseArgs()
 
 	request, _ := http.NewRequest("GET", uri, nil)
 	request.SetBasicAuth(*username, *password)
 	logrus.Debugf("Request uri: %s", request.URL.String())
 	for {
-		if err := downloader.NewDefaultDownloader().SingleThreadDownload(request, *filename); err != nil {
+		if err := downloader.NewDefaultDownloader().DownloadFile(request, *thread, *filename); err != nil {
 			log.Printf("Download error: %v, continue", err)
 		} else {
 			return
