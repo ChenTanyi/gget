@@ -2,7 +2,7 @@ package main
 
 import (
 	"flag"
-	"log"
+	"fmt"
 	"net/http"
 	"os"
 
@@ -16,6 +16,8 @@ var (
 	password         *string
 	filename         *string
 	thread           *int
+	queryLen         *string
+	start            *string
 	downloadContinue *bool
 )
 
@@ -26,6 +28,8 @@ func ParseArgs() {
 	password = flag.String("p", "", "Password")
 	filename = flag.String("o", "", "Output File")
 	thread = flag.Int("x", 8, "thread number")
+	queryLen = flag.String("l", "", "Max len to query hash")
+	start = flag.String("s", "0", "start position to query hash")
 	help := flag.Bool("h", false, "Show help")
 
 	flag.Parse()
@@ -35,25 +39,30 @@ func ParseArgs() {
 	}
 
 	if len(flag.Args()) < 1 {
-		log.Fatalf("URL is nessacery: %s [options] url\n", os.Args[0])
+		panic(fmt.Errorf("URL is nessacery: %s [options] url", os.Args[0]))
 	} else {
 		uri = flag.Arg(0)
 	}
 }
 
 func main() {
-	log.SetFlags(log.Ltime)
-	logrus.SetLevel(logrus.InfoLevel)
+	logrus.SetLevel(logrus.DebugLevel)
 	ParseArgs()
 
 	request, _ := http.NewRequest("GET", uri, nil)
 	request.SetBasicAuth(*username, *password)
 	logrus.Debugf("Request uri: %s", request.URL.String())
-	for {
-		if err := downloader.NewDefaultDownloader().DownloadFile(request, *thread, *filename); err != nil {
-			log.Printf("Download error: %v, continue", err)
-		} else {
-			return
+	if *queryLen != "" {
+		if err := downloader.NewDefaultDownloader().FilterUnmatchedHash(request, *filename, *queryLen, *start); err != nil {
+			logrus.Errorf("Filter hash error: %v", err)
+		}
+	} else {
+		for {
+			if err := downloader.NewDefaultDownloader().DownloadFile(request, *thread, *filename); err != nil {
+				logrus.Errorf("Download error: %v, continue", err)
+			} else {
+				return
+			}
 		}
 	}
 }

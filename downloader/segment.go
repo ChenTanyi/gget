@@ -4,10 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/sirupsen/logrus"
 )
 
 // ErrWrongSegmentFormat .
@@ -28,6 +27,11 @@ func (s *Segment) String() string {
 	return fmt.Sprintf("%d-%d", s.Begin, s.End)
 }
 
+// Readable .
+func (s *Segment) Readable() string {
+	return fmt.Sprintf("%s - %s", SizeToReadable(float64(s.Begin)), SizeToReadable(float64(s.End)))
+}
+
 // Length .
 func (s *Segment) Length() int64 {
 	return s.End - s.Begin
@@ -36,6 +40,26 @@ func (s *Segment) Length() int64 {
 // Finish .
 func (s *Segment) Finish() bool {
 	return s.Begin >= s.End
+}
+
+// Cross .
+func (s *Segment) Cross(seg *Segment) bool {
+	return s.Begin >= seg.Begin && s.Begin < seg.End || s.End <= seg.End && s.End > seg.Begin
+}
+
+// Connected .
+func (s *Segment) Connected(seg *Segment) bool {
+	return s.Begin == seg.End || s.End == seg.Begin
+}
+
+// Merge .
+func (s *Segment) Merge(seg *Segment) {
+	if seg.Begin < s.Begin {
+		s.Begin = seg.Begin
+	}
+	if seg.End > s.End {
+		s.End = seg.End
+	}
 }
 
 // NewSegments .
@@ -102,6 +126,7 @@ func (s *Segments) Remaining(total int64) []*Segment {
 
 // ToByte .
 func (s *Segments) ToByte() []byte {
+	s.CleanOverlap()
 	buffer := bytes.NewBuffer(nil)
 	for index, segment := range s.segments {
 		if index > 0 {
@@ -112,11 +137,23 @@ func (s *Segments) ToByte() []byte {
 	return buffer.Bytes()
 }
 
+// Readable .
+func (s *Segments) Readable() string {
+	buffer := bytes.NewBuffer(nil)
+	for index, segment := range s.segments {
+		if index > 0 {
+			buffer.WriteString(", ")
+		}
+		buffer.WriteString(segment.Readable())
+	}
+	return buffer.String()
+}
+
 // IsOverlaped .
 func (s *Segments) IsOverlaped() bool {
 	var end int64 = -1
 	for _, seg := range s.segments {
-		if seg.Begin < end {
+		if seg.Begin <= end {
 			return false
 		}
 		end = seg.End
@@ -126,6 +163,7 @@ func (s *Segments) IsOverlaped() bool {
 
 // CleanOverlap .
 func (s *Segments) CleanOverlap() {
+	s.Sort()
 	if !s.IsOverlaped() {
 		newSegments := make([]*Segment, 0, len(s.segments))
 		var end int64 = -1
@@ -142,6 +180,16 @@ func (s *Segments) CleanOverlap() {
 	}
 }
 
+// Sort .
+func (s *Segments) Sort() {
+	sort.Slice(s.segments, func(i, j int) bool {
+		if s.segments[i].Begin != s.segments[j].Begin {
+			return s.segments[i].Begin < s.segments[i].Begin
+		}
+		return s.segments[i].End < s.segments[j].End
+	})
+}
+
 func (s *Segments) insert(segment *Segment, index int) {
 	length := len(s.segments)
 	s.segments = append(s.segments, s.segments[length-1])
@@ -151,41 +199,40 @@ func (s *Segments) insert(segment *Segment, index int) {
 
 // Add .
 func (s *Segments) Add(segment *Segment) {
-	s.CleanOverlap()
 	added := false
-	for i, seg := range s.segments {
-		if seg.End == segment.Begin {
-			seg.End = segment.End
-			if i+1 < len(s.segments) && seg.End == s.segments[i+1].Begin {
-				s.segments[i+1].Begin = seg.Begin
-				s.segments = append(s.segments[:i], s.segments[i+1:]...)
-			}
+	for _, seg := range s.segments {
+		if seg.Connected(segment) || seg.Cross(segment) {
+			seg.Merge(segment)
 			added = true
 			break
-		}
-		if seg.Begin == segment.End {
-			seg.Begin = segment.Begin
-			if i > 0 && seg.Begin == s.segments[i-1].End {
-				s.segments[i-1].End = seg.End
-				s.segments = append(s.segments[:i], s.segments[i+1:]...)
-			}
-			added = true
-			break
-		}
-		if seg.Begin > segment.End {
-			s.insert(segment, i)
-			added = true
-			break
-		}
-		if seg.End >= segment.End {
-			msg := fmt.Sprintf("Unexpected segment %+v, inside %+v", segment, seg)
-			logrus.Error(msg)
-			panic(errors.New(msg))
 		}
 	}
 	if !added {
 		s.segments = append(s.segments, segment)
 	}
+	s.CleanOverlap()
+}
+
+// Remove .
+func (s *Segments) Remove(segment *Segment) {
+	newSegments := make([]*Segment, 0, len(s.segments))
+	for _, seg := range s.segments {
+		if seg.End <= segment.Begin || seg.Begin >= segment.End {
+			newSegments = append(newSegments, seg)
+		} else if seg.Begin < segment.Begin {
+			if seg.End <= segment.End {
+				seg.End = segment.Begin
+				newSegments = append(newSegments, seg)
+			} else {
+				newSegments = append(newSegments, &Segment{Begin: seg.Begin, End: segment.Begin}, &Segment{Begin: segment.End, End: seg.End})
+			}
+		} else if seg.End > segment.End {
+			seg.Begin = segment.End
+			newSegments = append(newSegments, seg)
+		}
+	}
+	s.segments = newSegments
+	s.CleanOverlap()
 }
 
 // Sum .
