@@ -425,21 +425,20 @@ func (d *Downloader) FilterUnmatchedHash(request *http.Request, filename, maxLen
 		start = 0
 	}
 
-	for _, seg := range segments.Segments() {
-		if seg.End <= start {
-			continue
-		}
-		if start < seg.Begin {
-			start = seg.Begin
-		}
+	canContinue, size, err := d.DetectContinueDownload(request)
+	if !canContinue || err != nil {
+		panic(fmt.Errorf("Can't get part of content, %v", err))
+	}
 
-		size := seg.End
-		for begin, end := start, start+maxLen; begin < size; begin, end = end, end+maxLen {
-			if end > size {
-				end = size
-			}
-			d.FilterUnmatchedHashSegments(request, file, begin, end, segments)
+	if len(segments.Segments()) == 0 {
+		segments.Add(&Segment{Begin: 0, End: size})
+	}
+
+	for begin, end := start, start+maxLen; begin < size; begin, end = end, end+maxLen {
+		if end > size {
+			end = size
 		}
+		d.FilterUnmatchedHashSegments(request, file, begin, end, segments)
 	}
 
 	return nil
