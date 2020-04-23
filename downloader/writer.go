@@ -3,6 +3,7 @@ package downloader
 import (
 	"errors"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -21,6 +22,7 @@ type ProgressWriter struct {
 
 // ErrOutOfWriterLimitation .
 var ErrOutOfWriterLimitation = errors.New("Out of writer limitation")
+var mutex = &sync.Mutex{}
 
 // ChanWriter .
 type ChanWriter struct {
@@ -71,6 +73,8 @@ func (p *ProgressWriter) Write(b []byte) (int, error) {
 }
 
 func (w *ChanWriter) Write(b []byte) (int, error) {
+	mutex.Lock()
+	defer mutex.Unlock()
 	select {
 	case w.Limit = <-w.LimitChan:
 	default:
