@@ -7,15 +7,25 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/sirupsen/logrus"
 )
 
-// ErrWrongSegmentFormat .
-var ErrWrongSegmentFormat = errors.New("Wrong Segment Format")
+var (
+	ErrWrongSegmentFormat = errors.New("Wrong Segment Format")
+	ErrInvalidJobId       = errors.New("Invalid Job Id")
+	ErrInvalidSize        = errors.New("Invalid Size")
+	ErrSegmentNotActive   = errors.New("Segment Not Active")
+	ErrAllSegmentIsFinish = errors.New("All Segment Is Finish")
+	ErrSendLimit          = errors.New("Send Limit Error")
+)
 
 // Segment .
 type Segment struct {
-	Begin int64
-	End   int64
+	jobid    int
+	begin    int64
+	end      int64
+	position int64
 }
 
 // Segments .
@@ -23,42 +33,157 @@ type Segments struct {
 	segments []*Segment
 }
 
+// NewSegment .
+func NewSegment(begin, end int64) *Segment {
+	return &Segment{begin: begin, position: begin, end: end}
+}
+
+// SegmentFromString .
+func SegmentFromString(s string) (*Segment, error) {
+	points := strings.Split(strings.TrimSpace(s), "-")
+	if len(points) != 3 {
+		return nil, ErrWrongSegmentFormat
+	}
+	begin, err := strconv.ParseInt(points[0], 0, 64)
+	if err != nil {
+		return nil, fmt.Errorf("Parse segment error: segment = %s, err = %v", s, err)
+	}
+	position, err := strconv.ParseInt(points[1], 0, 64)
+	if err != nil {
+		return nil, fmt.Errorf("Parse segment error: segment = %s, err = %v", s, err)
+	}
+	end, err := strconv.ParseInt(points[2], 0, 64)
+	if err != nil {
+		return nil, fmt.Errorf("Parse segment error: segment = %s, err = %v", s, err)
+	}
+	return &Segment{
+		begin:    begin,
+		position: position,
+		end:      end,
+	}, nil
+}
+
+// Add .
+func (s *Segment) Add(size int64) error {
+	if size < 0 {
+		return ErrInvalidSize
+	}
+	if !s.Active() {
+		logrus.Debugf("segment %s add %d", s.Readable(), size)
+		return ErrSegmentNotActive
+	}
+	s.position += size
+	if s.position > s.end {
+		s.position = s.end
+	}
+	return nil
+}
+
 func (s *Segment) String() string {
-	return fmt.Sprintf("%d-%d", s.Begin, s.End)
+	return fmt.Sprintf("%d-%d-%d", s.begin, s.position, s.end)
 }
 
 // Readable .
 func (s *Segment) Readable() string {
-	return fmt.Sprintf("%s - %s", SizeToReadable(float64(s.Begin)), SizeToReadable(float64(s.End)))
+	return fmt.Sprintf("%d: %s - %s(%s)", s.jobid, SizeToReadable(float64(s.begin)),
+		SizeToReadable(float64(s.position)), SizeToReadable(float64(s.end)))
+}
+
+// Begin .
+func (s *Segment) Begin() int64 {
+	return s.begin
+}
+
+// Current .
+func (s *Segment) Current() int64 {
+	return s.position
+}
+
+// End .
+func (s *Segment) End() int64 {
+	return s.end
 }
 
 // Length .
 func (s *Segment) Length() int64 {
-	return s.End - s.Begin
+	return s.end - s.begin
+}
+
+// Remaining .
+func (s *Segment) Remaining() int64 {
+	return s.end - s.position
+}
+
+// Written .
+func (s *Segment) Written() int64 {
+	return s.position - s.begin
 }
 
 // Finish .
 func (s *Segment) Finish() bool {
-	return s.Begin >= s.End
+	return s.position >= s.end
+}
+
+// Active .
+func (s *Segment) Active() bool {
+	return !s.Finish() && s.jobid != 0
+}
+
+// Start .
+func (s *Segment) Start(jobid int) error {
+	if jobid <= 0 {
+		logrus.Debugf("segment %s start invalid job id %d", s.Readable(), jobid)
+		return ErrInvalidJobId
+	}
+	s.jobid = jobid
+	logrus.Debugf("segment %s start", s.Readable())
+	return nil
+}
+
+// JobId .
+func (s *Segment) JobId() int {
+	return s.jobid
+}
+
+// Split .
+func (s *Segment) Split() *Segment {
+	mid := s.position + (s.end-s.position)/2
+	seg := NewSegment(mid, s.end)
+	s.end = mid
+	return seg
 }
 
 // Cross .
 func (s *Segment) Cross(seg *Segment) bool {
-	return s.Begin >= seg.Begin && s.Begin < seg.End || s.End <= seg.End && s.End > seg.Begin
+	return s.begin >= seg.begin && s.begin < seg.end || s.end <= seg.end && s.end > seg.begin
 }
 
 // Connected .
 func (s *Segment) Connected(seg *Segment) bool {
-	return s.Begin == seg.End || s.End == seg.Begin
+	return s.begin == seg.end || s.end == seg.begin
+}
+
+// Contain .
+func (s *Segment) Contain(seg *Segment) bool {
+	return s.begin <= seg.begin && seg.end <= s.end
 }
 
 // Merge .
 func (s *Segment) Merge(seg *Segment) {
-	if seg.Begin < s.Begin {
-		s.Begin = seg.Begin
-	}
-	if seg.End > s.End {
-		s.End = seg.End
+	if s.Finish() && seg.Finish() {
+		if s.Connected(seg) || s.Cross(seg) || s.Contain(seg) || seg.Contain(s) {
+			if s.begin > seg.begin {
+				s.begin = seg.begin
+			}
+			if s.end < seg.end {
+				s.end = seg.end
+			}
+			s.position = s.end
+		} else {
+			panic(fmt.Errorf("Connot merge uncross segment, %s + %s", s.Readable(), seg.Readable()))
+		}
+	} else {
+		panic(fmt.Errorf("Cannot merge unfinish segment, %s + %s", s.Readable(), seg.Readable()))
 	}
 }
 
@@ -74,26 +199,18 @@ func SegmentsReadFromByte(b []byte) (*Segments, error) {
 	segmentStrs := strings.Split(string(b), ",")
 	s := &Segments{}
 	s.segments = make([]*Segment, 0, len(segmentStrs))
-	// logrus.Debugf("Segments %+v %d", segmentStrs, len(segmentStrs))
 	for _, segmentStr := range segmentStrs {
 		segmentStr = strings.TrimSpace(segmentStr)
 		if segmentStr == "" {
 			continue
 		}
 
-		segment := strings.Split(segmentStr, "-")
-		if len(segment) != 2 {
-			return nil, ErrWrongSegmentFormat
-		}
-		begin, err := strconv.ParseInt(segment[0], 10, 64)
+		seg, err := SegmentFromString(segmentStr)
 		if err != nil {
-			return nil, fmt.Errorf("Parse segment error: segment = %s, err = %v", segmentStr, err)
+			return nil, err
 		}
-		end, err := strconv.ParseInt(segment[1], 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("Parse segment error: segment = %s, err = %v", segmentStr, err)
-		}
-		s.segments = append(s.segments, &Segment{Begin: begin, End: end})
+
+		s.segments = append(s.segments, seg)
 	}
 	return s, nil
 }
@@ -103,25 +220,38 @@ func (s *Segments) Segments() []*Segment {
 	return s.segments
 }
 
-// Remaining .
-func (s *Segments) Remaining(total int64) []*Segment {
-	if len(s.segments) == 0 {
-		return []*Segment{&Segment{Begin: 0, End: total}}
+// CleanOverlap .
+func (s *Segments) CleanOverlap() {
+	newSegments := make([]*Segment, 0, len(s.segments))
+	sort.Slice(s.segments, func(i, j int) bool {
+		if s.segments[i].Begin() == s.segments[j].Begin() {
+			return s.segments[i].End() > s.segments[j].End()
+		}
+		return s.segments[i].Begin() < s.segments[j].Begin()
+	})
+
+	finish := NewSegment(0, 0)
+	for _, seg := range s.segments {
+		if seg.Finish() {
+			if seg.Begin() <= finish.End() {
+				if seg.End() > finish.End() {
+					finish.end = seg.End()
+					finish.position = seg.End()
+				}
+			} else {
+				if finish.End() > finish.Begin() {
+					newSegments = append(newSegments, finish)
+				}
+				finish = seg
+			}
+			continue
+		}
+		newSegments = append(newSegments, seg)
 	}
-	s.CleanOverlap()
-	remaining := make([]*Segment, 0, len(s.segments))
-	for i, seg := range s.segments {
-		if i == 0 && seg.Begin > 0 {
-			remaining = append(remaining, &Segment{Begin: 0, End: seg.Begin})
-		}
-		if i+1 < len(s.segments) {
-			remaining = append(remaining, &Segment{Begin: seg.End, End: s.segments[i+1].Begin})
-		}
-		if i+1 == len(s.segments) && seg.End < total {
-			remaining = append(remaining, &Segment{Begin: seg.End, End: total})
-		}
+	if finish.End() > finish.Begin() {
+		newSegments = append(newSegments, finish)
 	}
-	return remaining
+	s.segments = newSegments
 }
 
 // ToByte .
@@ -149,98 +279,80 @@ func (s *Segments) Readable() string {
 	return buffer.String()
 }
 
-// IsOverlaped .
-func (s *Segments) IsOverlaped() bool {
-	var end int64 = -1
-	for _, seg := range s.segments {
-		if seg.Begin <= end {
-			return false
-		}
-		end = seg.End
-	}
-	return true
-}
-
-// CleanOverlap .
-func (s *Segments) CleanOverlap() {
-	s.Sort()
-	if !s.IsOverlaped() {
-		newSegments := make([]*Segment, 0, len(s.segments))
-		var end int64 = -1
-		for _, seg := range s.segments {
-			if end < seg.Begin {
-				newSegments = append(newSegments, seg)
-				end = seg.End
-			} else if end < seg.End {
-				newSegments[len(newSegments)-1].End = seg.End
-				end = seg.End
-			}
-		}
-		s.segments = newSegments
-	}
-}
-
-// Sort .
-func (s *Segments) Sort() {
-	sort.Slice(s.segments, func(i, j int) bool {
-		if s.segments[i].Begin != s.segments[j].Begin {
-			return s.segments[i].Begin < s.segments[i].Begin
-		}
-		return s.segments[i].End < s.segments[j].End
-	})
-}
-
-func (s *Segments) insert(segment *Segment, index int) {
-	length := len(s.segments)
-	s.segments = append(s.segments, s.segments[length-1])
-	copy(s.segments[index+1:], s.segments[index:length])
-	s.segments[index] = segment
-}
-
 // Add .
-func (s *Segments) Add(segment *Segment) {
+func (s *Segments) Add(jobid int, size int64) error {
 	added := false
 	for _, seg := range s.segments {
-		if seg.Connected(segment) || seg.Cross(segment) {
-			seg.Merge(segment)
+		if seg.JobId() == jobid && !seg.Finish() {
+			err := seg.Add(size)
+			if err != nil {
+				return err
+			}
 			added = true
 			break
 		}
 	}
 	if !added {
-		s.segments = append(s.segments, segment)
+		logrus.Warnf("Cannot add with job %d, segments: %s", jobid, s.Readable())
 	}
-	s.CleanOverlap()
+	return nil
 }
 
 // Remove .
-func (s *Segments) Remove(segment *Segment) {
-	newSegments := make([]*Segment, 0, len(s.segments))
-	for _, seg := range s.segments {
-		if seg.End <= segment.Begin || seg.Begin >= segment.End {
-			newSegments = append(newSegments, seg)
-		} else if seg.Begin < segment.Begin {
-			if seg.End <= segment.End {
-				seg.End = segment.Begin
-				newSegments = append(newSegments, seg)
-			} else {
-				newSegments = append(newSegments, &Segment{Begin: seg.Begin, End: segment.Begin}, &Segment{Begin: segment.End, End: seg.End})
-			}
-		} else if seg.End > segment.End {
-			seg.Begin = segment.End
-			newSegments = append(newSegments, seg)
-		}
-	}
-	s.segments = newSegments
-	s.CleanOverlap()
+func (s *Segments) Remove(begin, end int64) {
+	s.segments = append(s.segments, NewSegment(begin, end))
 }
 
-// Sum .
-func (s *Segments) Sum() int64 {
-	s.CleanOverlap()
+// Start .
+func (s *Segments) Start(jobId int, end int64, limitChan chan<- int64) (*Segment, error) {
+	if jobId <= 0 {
+		return nil, ErrInvalidJobId
+	}
+	maxSize := int64(0)
+	index := -1
+	for i, seg := range s.segments {
+		if !seg.Finish() {
+			if seg.JobId() == jobId {
+				if seg.End() != end {
+					select {
+					case limitChan <- seg.End():
+					default:
+						return nil, ErrSendLimit
+					}
+				}
+				return nil, nil
+			}
+			if seg.JobId() == 0 {
+				seg.Start(jobId)
+				return seg, nil
+			}
+			if seg.Length() > maxSize {
+				maxSize = seg.Remaining()
+				index = i
+			}
+		}
+	}
+	if maxSize >= 2*MinimalSegment {
+		seg := s.segments[index].Split()
+		seg.Start(jobId)
+		s.segments = append(s.segments, seg)
+		return seg, nil
+	}
+	return nil, ErrAllSegmentIsFinish
+}
+
+// InitSize .
+func (s *Segments) InitSize(length int64) {
+	if len(s.segments) == 0 {
+		s.segments = append(s.segments, NewSegment(0, length))
+	}
+}
+
+// Remaining .
+func (s *Segments) Remaining() int64 {
 	sum := int64(0)
 	for _, seg := range s.segments {
-		sum += seg.End - seg.Begin
+		sum += seg.Remaining()
 	}
 	return sum
 }

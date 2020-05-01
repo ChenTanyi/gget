@@ -80,12 +80,16 @@ func (w *ChanWriter) Write(b []byte) (int, error) {
 	default:
 	}
 	n, err := w.Dst.Write(b)
+	if w.Written+int64(n) > w.Limit {
+		n = int(w.Limit - w.Written)
+	}
+
 	if n > 0 {
 		w.Written += int64(n)
 		w.ResultChan <- n
 	}
 	if w.Written >= w.Limit {
-		return 0, ErrOutOfWriterLimitation
+		return n, ErrOutOfWriterLimitation
 	}
 	return n, err
 }

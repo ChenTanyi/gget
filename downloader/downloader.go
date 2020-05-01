@@ -32,6 +32,7 @@ type Downloader struct {
 type Job struct {
 	Index      int
 	Segment    *Segment
+	preEnd     int64
 	ResultChan chan int
 	LimitChan  chan int64
 }
@@ -83,11 +84,11 @@ func (d *Downloader) Download(uri string) error {
 
 // DownloadFile .
 func (d *Downloader) DownloadFile(request *http.Request, threadCount int, filename string) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("%+v", r)
-		}
-	}()
+	// defer func() {
+	// 	if r := recover(); r != nil {
+	// 		err = fmt.Errorf("%+v", r)
+	// 	}
+	// }()
 
 	if filename == "" {
 		filename = ExtractFilenameFromURI(request.URL)
@@ -137,86 +138,102 @@ func (d *Downloader) DownloadFile(request *http.Request, threadCount int, filena
 		panic(err)
 	}
 
-	waiting := segments.Remaining(contentLength)
-	written := segments.Sum()
+	segments.InitSize(contentLength)
 	jobs := make([]*Job, threadCount)
 	resultChan := make(chan result, threadCount)
-	almostFinish := false
 
-	logrus.Debugf("Remaining %+v %d", waiting, len(waiting))
+	logrus.Debugf("Read Segments %+v %d", segments.Segments(), len(segments.Segments()))
 
 	for i := 0; i < threadCount; i++ {
-		d.CreateJob(jobs, &waiting, i)
+		d.CreateNewJob(segments, jobs, i, threadCount)
 		if jobs[i] != nil {
 			go d.StartJob(request, jobs[i], file, resultChan)
-		} else {
-			almostFinish = true
 		}
 	}
 
-	for written < contentLength {
+	remaining := segments.Remaining()
+	for remaining > 0 {
 		jobsCount := make([]bool, threadCount)
 		timer := time.NewTicker(time.Second)
 		timerCount := 0
 		for { // per read timeout
-			receivePerSecond := int64(0)
-
 		LoopPerSecond:
 			for {
 				select {
 				case res := <-resultChan:
 					jobsCount[res.index] = true
-					receivePerSecond += res.size
-					segments.Add(&Segment{jobs[res.index].Segment.Begin, jobs[res.index].Segment.Begin + res.size})
-					jobs[res.index].Segment.Begin += res.size
-					if jobs[res.index].Segment.Finish() {
-						if !almostFinish {
-							d.CreateJob(jobs, &waiting, res.index)
-							if jobs[res.index] != nil {
-								go d.StartJob(request, jobs[res.index], file, resultChan)
-							} else {
-								almostFinish = true
-							}
+					err := segments.Add(res.index+1, res.size)
+					if err != nil {
+						panic(err)
+					}
+					if jobs[res.index] != nil && jobs[res.index].Segment.Finish() {
+						d.CreateNewJob(segments, jobs, res.index, threadCount)
+						if jobs[res.index] != nil {
+							go d.StartJob(request, jobs[res.index], file, resultChan)
 						}
-					} else {
-						receivePerSecond += res.size
 					}
 				case <-timer.C:
 					break LoopPerSecond
 				}
 			}
 
-			written = segments.Sum()
-			logrus.Infof("Download %s: %s / %s, speed %s/s", filename, SizeToReadable(float64(written)),
-				SizeToReadable(float64(contentLength)), SizeToReadable(float64(receivePerSecond)))
-			logrus.Debugf("Current Segments: %s", segments.Readable())
-			if written >= contentLength {
+			current := segments.Remaining()
+			logrus.Infof("Download %s: %s / %s, speed %s/s", filename, SizeToReadable(float64(contentLength-current)),
+				SizeToReadable(float64(contentLength)), SizeToReadable(float64(remaining-current)))
+			// logrus.Debugf("Current Segments: %s", segments.Readable())
+			remaining = current
+			if remaining <= 0 {
 				break
 			}
 
 			timerCount++
-			if timerCount == int(ReadTimeout/time.Second)+1 {
-				for i, job := range jobs {
-					if !jobsCount[i] {
-						if job != nil && !job.Segment.Finish() {
+			for i, job := range jobs {
+				if job == nil {
+					d.CreateNewJob(segments, jobs, i, threadCount)
+					jobsCount[i] = false
+				}
+				job = jobs[i]
+				if job != nil {
+					if timerCount == int(ReadTimeout/time.Second)+1 {
+						if !jobsCount[i] && !job.Segment.Finish() {
 							go d.StartJob(request, job, file, resultChan)
-						} else if !almostFinish {
-							d.CreateJob(jobs, &waiting, i)
-							if jobs[i] != nil {
-								go d.StartJob(request, jobs[i], file, resultChan)
-							} else {
-								almostFinish = true
-							}
+						}
+					}
+					seg, err := segments.Start(i+1, job.preEnd, job.LimitChan)
+					job.preEnd = job.Segment.End()
+					if seg != nil || err != nil {
+						if err == ErrSendLimit {
+							logrus.Warnf("Cannot send limit to job %d", i+1)
+						} else {
+							panic(fmt.Errorf("Unexpected segment during start, job = %+v, err = %v", job, err))
 						}
 					}
 				}
+			}
+			if timerCount == int(ReadTimeout/time.Second)+1 {
 				break
 			}
 		}
 	}
 
-	logrus.Infof("Finish download %s, %s", filename, SizeToReadable(float64(written)))
+	logrus.Infof("Finish download %s, %s", filename, SizeToReadable(float64(contentLength)))
 	return nil
+}
+
+// CreateNewJob .
+func (d *Downloader) CreateNewJob(segments *Segments, jobs []*Job, index, threadCount int) {
+	seg, err := segments.Start(index+1, 0, nil)
+	if seg == nil {
+		if err != ErrAllSegmentIsFinish {
+			if err == nil {
+				err = fmt.Errorf("Job already exists when start, id: %d", index+1)
+			}
+			panic(err)
+		}
+		jobs[index] = nil
+	} else {
+		jobs[index] = NewJob(seg, index, threadCount)
+	}
 }
 
 // SingleThreadDownload .
@@ -275,17 +292,16 @@ func (d *Downloader) SingleThreadDownload(request *http.Request, filename string
 
 // StartJob .
 func (d *Downloader) StartJob(req *http.Request, job *Job, dst io.WriterAt, resultChan chan<- result) {
-	logrus.Debugf("Start Job %+v", job.Segment)
 	request := req.Clone(context.Background())
-	SetRange(request, job.Segment.Begin, job.Segment.End-1)
+	SetRange(request, job.Segment.Current(), job.Segment.End()-1)
 	var writer io.Writer = &OffestWriter{
 		Dst:    dst,
-		Offset: job.Segment.Begin,
+		Offset: job.Segment.Current(),
 	}
 	writer = &ChanWriter{
 		Dst:        writer,
-		Written:    job.Segment.Begin,
-		Limit:      job.Segment.End,
+		Written:    job.Segment.Current(),
+		Limit:      job.Segment.End(),
 		LimitChan:  job.LimitChan,
 		ResultChan: job.ResultChan,
 	}
@@ -330,45 +346,6 @@ func (d *Downloader) DetectContinueDownload(req *http.Request) (bool, int64, err
 	return false, 0, fmt.Errorf("Request error: code = %d, status = %s", response.StatusCode, response.Status)
 }
 
-// CreateJob .
-func (d *Downloader) CreateJob(jobs []*Job, waiting *[]*Segment, index int) {
-	if len(*waiting) > 0 {
-		jobs[index] = NewJob((*waiting)[0], index, len(jobs))
-		*waiting = (*waiting)[1:]
-	} else {
-		jobs[index] = d.SeperateLargestJob(jobs, index)
-	}
-}
-
-// SeperateLargestJob .
-func (d *Downloader) SeperateLargestJob(jobs []*Job, index int) *Job {
-	job := d.FindLargestSegmentJob(jobs, index)
-	if job != nil && job.Segment.Length() >= 2*MinimalSegment {
-		middle := job.Segment.Begin + job.Segment.Length()/2
-		end := job.Segment.End
-		job.Segment.End = middle
-		job.LimitChan <- middle
-		return NewJob(&Segment{Begin: middle, End: end}, index, len(jobs))
-	}
-	return nil
-}
-
-// FindLargestSegmentJob .
-func (d *Downloader) FindLargestSegmentJob(jobs []*Job, index int) *Job {
-	var result *Job
-	length := int64(0)
-	for i, job := range jobs {
-		if i == index {
-			continue
-		}
-		if job != nil && job.Segment.Length() > length {
-			result = job
-			length = job.Segment.Length()
-		}
-	}
-	return result
-}
-
 // FilterUnmatchedHash .
 func (d *Downloader) FilterUnmatchedHash(request *http.Request, filename, maxLenStr, startStr string) (err error) {
 	defer func() {
@@ -396,7 +373,7 @@ func (d *Downloader) FilterUnmatchedHash(request *http.Request, filename, maxLen
 	}
 	defer file.Close()
 
-	stateFile, err := os.Open(filename + ".state")
+	stateFile, err := os.OpenFile(filename+".state", os.O_RDWR, 0755)
 	if err != nil {
 		panic(err)
 	}
@@ -430,9 +407,7 @@ func (d *Downloader) FilterUnmatchedHash(request *http.Request, filename, maxLen
 		panic(fmt.Errorf("Can't get part of content, %v", err))
 	}
 
-	if len(segments.Segments()) == 0 {
-		segments.Add(&Segment{Begin: 0, End: size})
-	}
+	segments.InitSize(size)
 
 	for begin, end := start, start+maxLen; begin < size; begin, end = end, end+maxLen {
 		if end > size {
@@ -480,7 +455,7 @@ func (d *Downloader) FilterUnmatchedHashSegments(req *http.Request, src io.Reade
 			hash1, equalsStr, string(hash2))
 		if !equals {
 			if end-begin <= 2*MinimalSegment {
-				segments.Remove(&Segment{Begin: begin, End: end})
+				segments.Remove(begin, end)
 			} else {
 				mid := begin + (end-begin)/2
 				d.FilterUnmatchedHashSegments(req, src, begin, mid, segments)
