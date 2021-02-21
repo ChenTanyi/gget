@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ var (
 	ErrWrongSegmentFormat = errors.New("Wrong Segment Format")
 	ErrInvalidJobId       = errors.New("Invalid Job Id")
 	ErrInvalidSize        = errors.New("Invalid Size")
+	ErrSegmentStarted     = errors.New("Segment Already Started")
 	ErrSegmentNotActive   = errors.New("Segment Not Active")
 	ErrAllSegmentIsFinish = errors.New("All Segment Is Finish")
 	ErrSendLimit          = errors.New("Send Limit Error")
@@ -26,6 +28,7 @@ type Segment struct {
 	begin    int64
 	end      int64
 	position int64
+	dst      io.WriterAt
 }
 
 // Segments .
@@ -63,20 +66,20 @@ func SegmentFromString(s string) (*Segment, error) {
 	}, nil
 }
 
-// Add .
-func (s *Segment) Add(size int64) error {
-	if size < 0 {
-		return ErrInvalidSize
-	}
+// Write .
+func (s *Segment) Write(b []byte) (size int, err error) {
 	if !s.Active() {
-		logrus.Debugf("segment %s add %d", s.Readable(), size)
-		return ErrSegmentNotActive
+		logrus.Debugf("segment[inactive] %s add %d", s, size)
+		return 0, ErrSegmentNotActive
 	}
-	s.position += size
-	if s.position > s.end {
-		s.position = s.end
+	size = len(b)
+	if size > int(s.Remaining()) {
+		logrus.Debugf("segment %s add %d to longer", s, size)
+		size = int(s.Remaining())
 	}
-	return nil
+	size, err = s.dst.WriteAt(b[:size], s.position)
+	s.position += int64(size)
+	return size, err
 }
 
 func (s *Segment) String() string {
@@ -130,12 +133,17 @@ func (s *Segment) Active() bool {
 }
 
 // Start .
-func (s *Segment) Start(jobid int) error {
+func (s *Segment) Start(jobid int, dst io.WriterAt) error {
+	if s.JobId() > 0 {
+		logrus.Debugf("segment %s already start", s.Readable())
+		return ErrSegmentStarted
+	}
 	if jobid <= 0 {
 		logrus.Debugf("segment %s start invalid job id %d", s.Readable(), jobid)
 		return ErrInvalidJobId
 	}
 	s.jobid = jobid
+	s.dst = dst
 	logrus.Debugf("segment %s start", s.Readable())
 	return nil
 }
@@ -279,23 +287,18 @@ func (s *Segments) Readable() string {
 	return buffer.String()
 }
 
-// Add .
-func (s *Segments) Add(jobid int, size int64) error {
-	added := false
+// Write .
+func (s *Segments) Write(jobid int, b []byte) (int, error) {
+	if jobid <= 0 {
+		return 0, ErrInvalidJobId
+	}
 	for _, seg := range s.segments {
 		if seg.JobId() == jobid && !seg.Finish() {
-			err := seg.Add(size)
-			if err != nil {
-				return err
-			}
-			added = true
-			break
+			return seg.Write(b)
 		}
 	}
-	if !added {
-		logrus.Warnf("Cannot add with job %d, segments: %s", jobid, s.Readable())
-	}
-	return nil
+	logrus.Debugf("Can't' write to job %d, segments: %s", jobid, s.Readable())
+	return 0, ErrAllSegmentIsFinish
 }
 
 // Remove .
@@ -304,7 +307,7 @@ func (s *Segments) Remove(begin, end int64) {
 }
 
 // Start .
-func (s *Segments) Start(jobId int, end int64, limitChan chan<- int64) (*Segment, error) {
+func (s *Segments) Start(jobId int, dst io.WriterAt) (*Segment, error) {
 	if jobId <= 0 {
 		return nil, ErrInvalidJobId
 	}
@@ -313,17 +316,10 @@ func (s *Segments) Start(jobId int, end int64, limitChan chan<- int64) (*Segment
 	for i, seg := range s.segments {
 		if !seg.Finish() {
 			if seg.JobId() == jobId {
-				if seg.End() != end {
-					select {
-					case limitChan <- seg.End():
-					default:
-						return nil, ErrSendLimit
-					}
-				}
 				return nil, nil
 			}
 			if seg.JobId() == 0 {
-				seg.Start(jobId)
+				seg.Start(jobId, dst)
 				return seg, nil
 			}
 			if seg.Length() > maxSize {
@@ -334,7 +330,7 @@ func (s *Segments) Start(jobId int, end int64, limitChan chan<- int64) (*Segment
 	}
 	if maxSize >= 2*MinimalSegment {
 		seg := s.segments[index].Split()
-		seg.Start(jobId)
+		seg.Start(jobId, dst)
 		s.segments = append(s.segments, seg)
 		return seg, nil
 	}

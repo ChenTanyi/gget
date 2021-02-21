@@ -16,6 +16,7 @@ var (
 	password         *string
 	filename         *string
 	thread           *int
+	proxy            *string
 	queryLen         *string
 	start            *string
 	downloadContinue *bool
@@ -27,7 +28,8 @@ func ParseArgs() {
 	username = flag.String("u", "", "User name")
 	password = flag.String("p", "", "Password")
 	filename = flag.String("o", "", "Output File")
-	thread = flag.Int("x", 8, "thread number")
+	thread = flag.Int("n", 8, "thread number")
+	proxy = flag.String("x", "", "proxy")
 	queryLen = flag.String("l", "", "Max len to query hash")
 	start = flag.String("s", "0", "start position to query hash")
 	help := flag.Bool("h", false, "Show help")
