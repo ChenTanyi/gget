@@ -29,7 +29,6 @@ func ParseArgs() {
 	password = flag.String("p", "", "Password")
 	filename = flag.String("o", "", "Output File")
 	thread = flag.Int("n", 8, "thread number")
-	proxy = flag.String("x", "", "proxy")
 	queryLen = flag.String("l", "", "Max len to query hash")
 	start = flag.String("s", "0", "start position to query hash")
 	help := flag.Bool("h", false, "Show help")

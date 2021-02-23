@@ -38,8 +38,8 @@ type Job struct {
 }
 
 type result struct {
-	index int
-	b     []byte
+	job *Job
+	b   []byte
 }
 
 // NewDefaultDownloader .
@@ -140,81 +140,78 @@ func (d *Downloader) DownloadFile(request *http.Request, threadCount int, filena
 	jobs := make([]*Job, threadCount)
 	resultChan := make(chan *result, threadCount)
 
-	// logrus.Debugf("Read Segments %+v %d", segments.Segments(), len(segments.Segments()))
+	logrus.Debugf("Read %d Segments: %+v", len(segments.Segments()), segments.Segments())
 
-	// for i := 0; i < threadCount; i++ {
-	// 	d.CreateNewJob(segments, jobs, i, threadCount)
-	// 	if jobs[i] != nil {
-	// 		go d.StartJob(request, jobs[i], file, resultChan)
-	// 	}
-	// }
+	for i := 0; i < threadCount; i++ {
+		d.CreateNewJob(segments, jobs, i, file)
+		if jobs[i] != nil {
+			go d.StartJob(request, jobs[i], resultChan)
+		}
+	}
 
-	// remaining := segments.Remaining()
-	// for remaining > 0 {
-	// 	jobsCount := make([]bool, threadCount)
-	// 	timer := time.NewTicker(time.Second)
-	// 	timerCount := 0
-	// 	for { // per read timeout
-	// 	LoopPerSecond:
-	// 		for {
-	// 			select {
-	// 			case res := <-resultChan:
-	// 				jobsCount[res.index] = true
-	// 				err := segments.Add(res.index+1, res.size)
-	// 				if err != nil {
-	// 					panic(err)
-	// 				}
-	// 				if jobs[res.index] != nil && jobs[res.index].Segment.Finish() {
-	// 					d.CreateNewJob(segments, jobs, res.index, threadCount)
-	// 					if jobs[res.index] != nil {
-	// 						go d.StartJob(request, jobs[res.index], file, resultChan)
-	// 					}
-	// 				}
-	// 			case <-timer.C:
-	// 				break LoopPerSecond
-	// 			}
-	// 		}
+	remaining := segments.Remaining()
+	for remaining > 0 {
+		jobsCount := make([]bool, threadCount)
+		timer := time.NewTicker(time.Second)
+		timerCount := 0
+		for { // per read timeout
+		LoopPerSecond:
+			for {
+				select {
+				case res := <-resultChan:
+					index := res.job.Index
+					jobsCount[index] = true
+					_, err = res.job.Segment.Write(res.b)
+					if err != nil {
+						if err != ErrSegmentFinish {
+							panic(err)
+						}
+					}
+					if jobs[index] != nil && jobs[index].Segment.Finish() {
+						d.CreateNewJob(segments, jobs, index, file)
+						if jobs[index] != nil {
+							go d.StartJob(request, jobs[index], resultChan)
+						}
+					}
+				case <-timer.C:
+					break LoopPerSecond
+				}
+			}
 
-	// 		current := segments.Remaining()
-	// 		logrus.Infof("Download %s: %s / %s, speed %s/s", filename, SizeToReadable(float64(contentLength-current)),
-	// 			SizeToReadable(float64(contentLength)), SizeToReadable(float64(remaining-current)))
-	// 		// logrus.Debugf("Current Segments: %s", segments.Readable())
-	// 		remaining = current
-	// 		if remaining <= 0 {
-	// 			break
-	// 		}
+			current := segments.Remaining()
+			logrus.Infof("Download %s: %s / %s, speed %s/s", filename, SizeToReadable(float64(contentLength-current)),
+				SizeToReadable(float64(contentLength)), SizeToReadable(float64(remaining-current)))
+			// logrus.Debugf("Current Segments: %s", segments.Readable())
+			remaining = current
+			if remaining <= 0 {
+				break
+			}
 
-	// 		timerCount++
-	// 		for i, job := range jobs {
-	// 			if job == nil {
-	// 				d.CreateNewJob(segments, jobs, i, threadCount)
-	// 				jobsCount[i] = false
-	// 			}
-	// 			job = jobs[i]
-	// 			if job != nil {
-	// 				if timerCount == int(ReadTimeout/time.Second)+1 {
-	// 					if !jobsCount[i] && !job.Segment.Finish() {
-	// 						go d.StartJob(request, job, file, resultChan)
-	// 					}
-	// 				}
-	// 				seg, err := segments.Start(i+1, job.preEnd, job.LimitChan)
-	// 				job.preEnd = job.Segment.End()
-	// 				if seg != nil || err != nil {
-	// 					if err == ErrSendLimit {
-	// 						logrus.Warnf("Cannot send limit to job %d", i+1)
-	// 					} else {
-	// 						panic(fmt.Errorf("Unexpected segment during start, job = %+v, err = %v", job, err))
-	// 					}
-	// 				}
-	// 			}
-	// 		}
-	// 		if timerCount == int(ReadTimeout/time.Second)+1 {
-	// 			break
-	// 		}
-	// 	}
-	// }
+			timerCount++
+			for i, job := range jobs {
+				if job == nil {
+					d.CreateNewJob(segments, jobs, i, file)
+					jobsCount[i] = false
+				}
+				job = jobs[i]
+				if job != nil {
+					if timerCount == int(ReadTimeout/time.Second)+1 {
+						if !jobsCount[i] && !job.Segment.Finish() {
+							if job.Response != nil {
+								job.Response.Body.Close()
+							}
+							go d.StartJob(request, job, resultChan)
+						}
+					}
+				}
+			}
+			if timerCount == int(ReadTimeout/time.Second)+1 {
+				break
+			}
+		}
+	}
 
-	// logrus.Infof("Finish download %s, %s", filename, SizeToReadable(float64(contentLength)))
+	logrus.Infof("Finish download %s, %s", filename, SizeToReadable(float64(contentLength)))
 	return nil
 }
 
@@ -231,6 +228,38 @@ func (d *Downloader) CreateNewJob(segments *Segments, jobs []*Job, index int, ds
 		jobs[index] = nil
 	} else {
 		jobs[index] = NewJob(seg, index)
+	}
+}
+
+// StartJob .
+func (d *Downloader) StartJob(req *http.Request, job *Job, resultChan chan<- *result) {
+	chanWriter := NewChanWriter(8)
+
+	go func() {
+		request := req.Clone(context.Background())
+		SetRange(request, job.Segment.Current(), job.Segment.End()-1)
+
+		response, err := d.Client.Do(request)
+		if err != nil {
+			return
+		}
+		defer response.Body.Close()
+
+		if response.StatusCode != 206 || (job.Segment.Current() == 0 && response.StatusCode >= 300) {
+			panic(errors.New("Unable to get partial content from server"))
+		}
+
+		job.Response = response
+		io.Copy(chanWriter, response.Body)
+	}()
+
+	for {
+		select {
+		case b := <-chanWriter.Chan():
+			resultChan <- &result{job, b}
+		case <-time.After(ReadTimeout):
+			return
+		}
 	}
 }
 
@@ -286,32 +315,6 @@ func (d *Downloader) SingleThreadDownload(request *http.Request, filename string
 		panic(ErrReadTimeout)
 	}
 	return nil
-}
-
-// StartJob .
-func (d *Downloader) StartJob(req *http.Request, job *Job, dst io.WriterAt, resultChan chan<- result) {
-	request := req.Clone(context.Background())
-	SetRange(request, job.Segment.Current(), job.Segment.End()-1)
-
-	response, err := d.Client.Do(request)
-	if err != nil {
-		return
-	}
-	defer response.Body.Close()
-
-	if response.StatusCode != 206 {
-		return
-	}
-	go io.Copy(writer, response.Body)
-
-	for {
-		select {
-		case res := <-job.ResultChan:
-			resultChan <- result{job.Index, int64(res)}
-		case <-time.After(ReadTimeout):
-			return
-		}
-	}
 }
 
 // DetectContinueDownload .

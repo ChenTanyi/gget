@@ -18,6 +18,7 @@ var (
 	ErrInvalidSize        = errors.New("Invalid Size")
 	ErrSegmentStarted     = errors.New("Segment Already Started")
 	ErrSegmentNotActive   = errors.New("Segment Not Active")
+	ErrSegmentFinish      = errors.New("Segment Finish")
 	ErrAllSegmentIsFinish = errors.New("All Segment Is Finish")
 	ErrSendLimit          = errors.New("Send Limit Error")
 )
@@ -68,10 +69,14 @@ func SegmentFromString(s string) (*Segment, error) {
 
 // Write .
 func (s *Segment) Write(b []byte) (size int, err error) {
+	if s.Finish() {
+		return 0, ErrSegmentFinish
+	}
 	if !s.Active() {
 		logrus.Debugf("segment[inactive] %s add %d", s, size)
 		return 0, ErrSegmentNotActive
 	}
+
 	size = len(b)
 	if size > int(s.Remaining()) {
 		logrus.Debugf("segment %s add %d to longer", s, size)
@@ -79,6 +84,10 @@ func (s *Segment) Write(b []byte) (size int, err error) {
 	}
 	size, err = s.dst.WriteAt(b[:size], s.position)
 	s.position += int64(size)
+
+	if err == nil && s.Finish() {
+		err = ErrSegmentFinish
+	}
 	return size, err
 }
 
