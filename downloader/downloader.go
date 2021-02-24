@@ -136,6 +136,11 @@ func (d *Downloader) DownloadFile(request *http.Request, threadCount int, filena
 		panic(err)
 	}
 
+	return d.MultiThreadDownload(request, segments, file, filename, contentLength, threadCount)
+}
+
+// MultiThreadDownload .
+func (d *Downloader) MultiThreadDownload(request *http.Request, segments *Segments, file io.WriterAt, filename string, contentLength int64, threadCount int) (err error) {
 	segments.InitSize(contentLength)
 	jobs := make([]*Job, threadCount)
 	resultChan := make(chan *result, threadCount)
@@ -161,10 +166,11 @@ func (d *Downloader) DownloadFile(request *http.Request, threadCount int, filena
 				case res := <-resultChan:
 					index := res.job.Index
 					jobsCount[index] = true
+					logrus.Debugf("Receive %s %v", res.job.Segment, res.b)
 					_, err = res.job.Segment.Write(res.b)
 					if err != nil {
 						if err != ErrSegmentFinish {
-							panic(err)
+							return err
 						}
 					}
 					if jobs[index] != nil && jobs[index].Segment.Finish() {
@@ -181,7 +187,8 @@ func (d *Downloader) DownloadFile(request *http.Request, threadCount int, filena
 			current := segments.Remaining()
 			logrus.Infof("Download %s: %s / %s, speed %s/s", filename, SizeToReadable(float64(contentLength-current)),
 				SizeToReadable(float64(contentLength)), SizeToReadable(float64(remaining-current)))
-			// logrus.Debugf("Current Segments: %s", segments.Readable())
+			logrus.Debugf("Left %d", current)
+			logrus.Debugf("Current Segments: %s", segments)
 			remaining = current
 			if remaining <= 0 {
 				break
@@ -256,6 +263,7 @@ func (d *Downloader) StartJob(req *http.Request, job *Job, resultChan chan<- *re
 	for {
 		select {
 		case b := <-chanWriter.Chan():
+			logrus.Debugf("chan %v %v", chanWriter.Chan(), b)
 			resultChan <- &result{job, b}
 		case <-time.After(ReadTimeout):
 			return
@@ -310,9 +318,9 @@ func (d *Downloader) SingleThreadDownload(request *http.Request, filename string
 		Current: filesize,
 		Total:   filesize + response.ContentLength,
 	}
-	copySize := CopyWithReadTimeout(writer, response.Body, ReadTimeout)
+	copySize, err := CopyWithReadTimeout(writer, response.Body, ReadTimeout)
 	if copySize < response.ContentLength {
-		panic(ErrReadTimeout)
+		panic(err)
 	}
 	return nil
 }

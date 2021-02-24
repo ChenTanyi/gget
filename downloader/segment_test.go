@@ -85,7 +85,7 @@ func TestMultiSegments(t *testing.T) {
 
 		sz, err := segs.Write(index+1, src[ranges[index].Begin:int(ranges[index].Begin)+sz])
 		ranges[index].Begin += int64(sz)
-		if err != nil && err != ErrAllSegmentIsFinish {
+		if err != nil && err != ErrAllSegmentIsFinish && err != ErrSegmentFinish {
 			t.Error(err)
 		}
 
@@ -102,6 +102,16 @@ func TestMultiSegments(t *testing.T) {
 	}
 
 	if !bytes.Equal(src, dst.Bytes()) {
-		t.Errorf("Copy error, src = %v, dst = %v", src, dst.Bytes())
+		errorCount := 0
+		for i, b := range src {
+			if b != dst.Bytes()[i] {
+				t.Logf("Not Match in %d, src: %d, dst %d", i, b, dst.Bytes()[i])
+				errorCount++
+			}
+			if errorCount > 100 {
+				break
+			}
+		}
+		t.Error("Copy error")
 	}
 }

@@ -153,7 +153,7 @@ func (s *Segment) Start(jobid int, dst io.WriterAt) error {
 	}
 	s.jobid = jobid
 	s.dst = dst
-	logrus.Debugf("segment %s start", s.Readable())
+	logrus.Infof("segment %s start", s.Readable())
 	return nil
 }
 
@@ -294,6 +294,10 @@ func (s *Segments) Readable() string {
 		buffer.WriteString(segment.Readable())
 	}
 	return buffer.String()
+}
+
+func (s *Segments) String() string {
+	return string(s.ToByte())
 }
 
 // Write .
