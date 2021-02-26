@@ -29,7 +29,7 @@ func (r *ResponseWriter) Header() http.Header {
 }
 
 func (r *ResponseWriter) Write(b []byte) (int, error) {
-	logrus.Debugf("Wrtie %v\n", b)
+	logrus.Debugf("Wrtie %v", b)
 	return r.w.Write(b)
 }
 
@@ -52,8 +52,24 @@ func TestMultiThreadDownload(t *testing.T) {
 	size := int64(1024 * 1024)
 	thread := 16
 	src := make([]byte, size)
-	rand.Read(src)
+	// rand.Read(src)
 	dst := &WriteAtBuffer{buffer: make([]byte, size)}
+
+	count := 0
+	for {
+		for i := 0; i < 256; i++ {
+			for j := 0; j < 256; j++ {
+				if int64(count*256*256+i*256+j) >= size {
+					break
+				}
+				src[count*256*256+i*256+j] = byte((count + i + j) % 256)
+			}
+		}
+		count++
+		if int64(count*256*256) >= size {
+			break
+		}
+	}
 
 	f, err := os.OpenFile("test", os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {

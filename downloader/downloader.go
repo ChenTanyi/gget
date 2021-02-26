@@ -20,7 +20,7 @@ import (
 )
 
 var (
-	MinimalSegment  int64 = 256 * 1024
+	MinimalSegment  int64 = 10
 	ReadTimeout           = 20 * time.Second
 	ErrUnsupport206       = errors.New("Server Not Support 206")
 )
