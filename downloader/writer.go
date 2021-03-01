@@ -72,8 +72,10 @@ func NewChanWriter(size int) *ChanWriter {
 }
 
 func (w *ChanWriter) Write(b []byte) (int, error) {
-	w.ch <- b
-	return len(b), nil
+	cp := make([]byte, len(b))
+	copy(cp, b)
+	w.ch <- cp
+	return len(cp), nil
 }
 
 // Chan .

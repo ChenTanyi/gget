@@ -20,7 +20,7 @@ import (
 )
 
 var (
-	MinimalSegment  int64 = 10
+	MinimalSegment  int64 = 1024 * 8
 	ReadTimeout           = 20 * time.Second
 	ErrUnsupport206       = errors.New("Server Not Support 206")
 )
@@ -173,6 +173,14 @@ func (d *Downloader) MultiThreadDownload(request *http.Request, segments *Segmen
 							return err
 						}
 					}
+					if res.job.Segment.Finish() {
+						if res.job.Response != nil {
+							err = res.job.Response.Body.Close()
+							if err != nil {
+								logrus.Errorf("Close Response Body Error: %v", err)
+							}
+						}
+					}
 					if jobs[index] != nil && jobs[index].Segment.Finish() {
 						d.CreateNewJob(segments, jobs, index, file)
 						if jobs[index] != nil {
@@ -230,6 +238,7 @@ func (d *Downloader) CreateNewJob(segments *Segments, jobs []*Job, index int, ds
 			if err == nil {
 				err = fmt.Errorf("Job already exists when start, id: %d", index+1)
 			}
+			logrus.Debugf("Segments %s", segments)
 			panic(err)
 		}
 		jobs[index] = nil
