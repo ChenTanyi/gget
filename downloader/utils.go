@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -101,22 +100,21 @@ func ExtractFilenameFromURI(uri *url.URL) string {
 }
 
 // CopyWithReadTimeout .
-func CopyWithReadTimeout(dst io.Writer, src io.Reader, timeout time.Duration) int64 {
-	result := make(chan int)
-	var total int64
-	writer := &ChanWriter{
-		Dst:        dst,
-		Limit:      math.MaxInt64,
-		ResultChan: result,
-	}
+func CopyWithReadTimeout(dst io.Writer, src io.Reader, timeout time.Duration) (int64, error) {
+	writer := NewChanWriter(8)
 	go io.Copy(writer, src)
 
+	total := int64(0)
 	for {
 		select {
-		case n := <-result:
+		case b := <-writer.Chan():
+			n, err := dst.Write(b)
 			total += int64(n)
+			if err != nil {
+				return total, err
+			}
 		case <-time.After(timeout):
-			return total
+			return total, ErrReadTimeout
 		}
 	}
 }

@@ -3,7 +3,6 @@ package downloader
 import (
 	"errors"
 	"io"
-	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -22,15 +21,10 @@ type ProgressWriter struct {
 
 // ErrOutOfWriterLimitation .
 var ErrOutOfWriterLimitation = errors.New("Out of writer limitation")
-var mutex = &sync.Mutex{}
 
 // ChanWriter .
 type ChanWriter struct {
-	Dst        io.Writer
-	Written    int64
-	Limit      int64
-	ResultChan chan<- int
-	LimitChan  <-chan int64
+	ch chan []byte
 }
 
 // OffestWriter .
@@ -72,26 +66,21 @@ func (p *ProgressWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
-func (w *ChanWriter) Write(b []byte) (int, error) {
-	mutex.Lock()
-	defer mutex.Unlock()
-	select {
-	case w.Limit = <-w.LimitChan:
-	default:
-	}
-	n, err := w.Dst.Write(b)
-	if w.Written+int64(n) > w.Limit {
-		n = int(w.Limit - w.Written)
-	}
+// NewChanWriter .
+func NewChanWriter(size int) *ChanWriter {
+	return &ChanWriter{ch: make(chan []byte, size)}
+}
 
-	if n > 0 {
-		w.Written += int64(n)
-		w.ResultChan <- n
-	}
-	if w.Written >= w.Limit {
-		return n, ErrOutOfWriterLimitation
-	}
-	return n, err
+func (w *ChanWriter) Write(b []byte) (int, error) {
+	cp := make([]byte, len(b))
+	copy(cp, b)
+	w.ch <- cp
+	return len(cp), nil
+}
+
+// Chan .
+func (w *ChanWriter) Chan() <-chan []byte {
+	return w.ch
 }
 
 func (w *OffestWriter) Write(b []byte) (int, error) {
