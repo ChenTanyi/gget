@@ -1,9 +1,9 @@
 package main
 
 import (
-	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 
 	"github.com/chentanyi/gget/downloader"
 	"github.com/sirupsen/logrus"
@@ -25,12 +25,13 @@ var (
 // ParseArgs .
 func ParseArgs() {
 	cmd := &cobra.Command{
+		Use: "gget <url>",
 		Run: func(cmd *cobra.Command, args []string) {
 			if len(args) < 1 {
-				panic(fmt.Errorf("URL is nessacery: %s [options] <url>", os.Args[0]))
-			} else {
-				uri = args[0]
+				cmd.Usage()
+				os.Exit(0)
 			}
+			uri = args[0]
 		},
 	}
 	downloadContinue = cmd.PersistentFlags().BoolP("continue", "c", true, "Continue Download")
@@ -47,6 +48,9 @@ func ParseArgs() {
 		cmd.Usage()
 		panic(err)
 	}
+	if uri == "" {
+		os.Exit((0))
+	}
 }
 
 func main() {
@@ -56,6 +60,11 @@ func main() {
 		logrus.SetLevel(logrus.DebugLevel)
 	} else {
 		logrus.SetLevel(logrus.InfoLevel)
+	}
+
+	if match, err := regexp.MatchString("https?://", uri); !match || err != nil {
+		logrus.Errorf("Unsupport uri: %s", uri)
+		panic(err)
 	}
 
 	request, _ := http.NewRequest("GET", uri, nil)
